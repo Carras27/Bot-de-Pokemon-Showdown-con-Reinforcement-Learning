@@ -310,16 +310,13 @@ class MaskableEnvWrapper(gym.Wrapper):
     """
     Wrapper de Gymnasium para almacenar y exponer la máscara de acciones válidas.
 
-    Extrae la clave 'action_mask' del diccionario de observaciones en cada turno
-    y la expone a través del método `action_masks()`. Esto evita que el bot
-    intente acciones ilegales (como seleccionar un movimiento sin PP, bloqueado
-    por Otra Vez / Mofa, o cambiar a un Pokémon debilitado).
+    Antes de cada turno extrae la clave 'action_mask' del diccionario de observaciones
+    y se la entrega a MaskablePPO de modo que esta le ponga probabilidad 0 a acciones ilegales.
     """
 
     def reset(self, **kwargs):
         """
         Reinicia el entorno al comenzar un nuevo combate.
-
         Extrae y almacena la máscara de acciones correspondiente al primer turno.
         """
         obs, info = self.env.reset(**kwargs)
@@ -327,11 +324,11 @@ class MaskableEnvWrapper(gym.Wrapper):
         return obs, info
 
     def step(self, action):
-        """Ejecuta una acción en el combate.
+        """
+        Ejecuta una acción en el combate.
 
         Antes de enviarla al simulador, repara el caso en que los dos
         slots pidan cambiar al mismo Pokémon de banca.
-
         Actualiza la máscara con las acciones legales disponibles para el
         siguiente turno.
         """
@@ -343,7 +340,6 @@ class MaskableEnvWrapper(gym.Wrapper):
     def action_masks(self):
         """
         Devuelve la máscara de acciones actual.
-
         Método requerido por librerías como `sb3-contrib` para filtrar
         las acciones inválidas antes de que la red neuronal elija una.
         """
@@ -398,37 +394,41 @@ def repair_conflicting_switches(action, mask):
            de los dos Pokémon pudiera actuar, algo que no ocurre en la práctica).
         En ambos casos se sustituye el segundo slot por otra opción válida de
         su propia máscara.
+
+        No obsante, la red de entrenamiento guarda la acción 'original'. Por tanto,
+        si se llama a esta función habitualmente, habrá que arreglar por otro lado.
     """
-        
+    # Guardamos una copia de las acciones y el dtype original para devolverlo al final.
     original_dtype = np.asarray(action).dtype
     action = list(action)
     a0, a1 = int(action[0]), int(action[1])
-    is_switch0 = 1 <= a0 < 7
+    is_switch0 = 1 <= a0 < 7 # Las acciones 1-6 son cambios (el 0 es pass, a partir del 7 movimientos)
     is_switch1 = 1 <= a1 < 7
 
-    half = len(mask) // 2
+    half = len(mask) // 2 # La máscara se compone de las máscaras de ambos slots. Lo dividimos.
     slot1_mask = mask[half:]
 
-    conflict_same_switch = is_switch0 and is_switch1 and a0 == a1
-    conflict_double_pass = a0 == 0 and a1 == 0
+    conflict_same_switch = is_switch0 and is_switch1 and a0 == a1 # Mismo cambio
+    conflict_double_pass = a0 == 0 and a1 == 0 # Ambos piden 'pass'
 
+    # Si piden el mismo cambio, buscamos otra opción válida para el segundo slot.
     if conflict_same_switch:
-        alt_switches = [i for i in range(1, 7) if i < len(slot1_mask) and slot1_mask[i] and i != a1]
+        alt_switches = [i for i in range(1, 7) if i < len(slot1_mask) and slot1_mask[i] and i != a1] # Buscamos otro cambio válido en la máscara del segundo slot
         if alt_switches:
             action[1] = alt_switches[0]
-        else:
+        else: # Si no hay otro cambio vamos a buscar cualquier acción válida (movimiento o 'pass').
             alternatives = [i for i, valid in enumerate(slot1_mask) if valid and i != a1]
             if alternatives:
                 action[1] = alternatives[0]
-            # Si tampoco hay alternativa, se deja como está: strict=False
-            # se encarga de ese caso extremo (no debería darse casi nunca).
+            # Si tampoco hay alternativa, se deja como está. strict=False se
+            # encargará de ese caso extremo (no debería ocurrir).
+    # Si ambos piden 'pass', buscamos otra acción válida para el segundo slot.
     elif conflict_double_pass:
         alternatives = [i for i, valid in enumerate(slot1_mask) if valid and i != 0]
         if alternatives:
             action[1] = alternatives[0]
         # Si tampoco hay alternativa (caso extremo), se deja como está.
 
-    # IMPORTANTE: poke-env llama a action[i].item() esperando un escalar de
-    # numpy, no un int de Python normal — por eso se devuelve como array,
-    # no como lista, conservando el dtype original.
+    # poke-env llama a action[i].item() esperando un escalar de numpy,
+    # por eso se devuelve como array, conservando el dtype original.
     return np.array(action, dtype=original_dtype)
