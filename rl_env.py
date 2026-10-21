@@ -5,21 +5,15 @@ API poke-env.
 
 import numpy as np
 import gymnasium as gym
+import math
 
 from gymnasium.spaces import Box
-from poke_env.environment.doubles_env import DoublesEnv # API para combates dobles
+from poke_env.environment.doubles_env import DoublesEnv
 from poke_env.battle.pokemon_type import PokemonType
-from poke_env.battle import Status, Field, Weather, SideCondition
+from poke_env.battle import Status, Field, Weather, SideCondition, MoveCategory
 from poke_env.battle.side_condition import STACKABLE_CONDITIONS
- 
-
-
-# Diccionario para mapear los 18 (20?) tipos de Pokémon a un número único (0 a 17 (19?))
-# Creo que son 20 tipos, está el 'Stellar' y el '???'
-TYPE_MAP = {t: i for i, t in enumerate(PokemonType) if t is not None}
 
 # Lista de estados alterados, no incluyo el estado debilitado.
-# El estado confusión no se considera como tal.
 STATUS_LIST = [Status.BRN, Status.FRZ, Status.PAR, Status.PSN,
 Status.SLP, Status.TOX]
 
@@ -27,16 +21,25 @@ Status.SLP, Status.TOX]
 WEATHER_LIST = [Weather.SUNNYDAY, Weather.RAINDANCE, Weather.SANDSTORM, Weather.SNOW]
 
 # Lista de campos.
-FIELD_LIST = [Field.ELECTRIC_TERRAIN, Field.GRASSY_TERRAIN, Field.MISTY_TERRAIN, Field.PSYCHIC_TERRAIN, Field.GRAVITY, Field.MAGIC_ROOM, Field.TRICK_ROOM]
+FIELD_LIST = [Field.ELECTRIC_TERRAIN, Field.GRASSY_TERRAIN, Field.MISTY_TERRAIN, Field.PSYCHIC_TERRAIN,
+             Field.GRAVITY, Field.MAGIC_ROOM, Field.TRICK_ROOM, Field.FAIRY_LOCK, Field.NEUTRALIZING_GAS,
+             ]
 
 # Lista de condiciones de bando (Side Conditions) [12]
 SIDE_COND_LIST = [SideCondition.REFLECT, SideCondition.LIGHT_SCREEN, SideCondition.WIDE_GUARD,
                     SideCondition.AURORA_VEIL, SideCondition.SAFEGUARD, SideCondition.QUICK_GUARD,
                     SideCondition.MIST, SideCondition.TAILWIND, SideCondition.STEALTH_ROCK, SideCondition.STICKY_WEB,
-                    SideCondition.SPIKES, SideCondition.TOXIC_SPIKES]
+                    SideCondition.SPIKES, SideCondition.TOXIC_SPIKES, SideCondition.CRAFTY_SHIELD]
                   
 # Constantes 
-NUM_POKEMON = 6
+NUM_POKEMON = 6 * 2 # equipo propio + oponente
+
+# PS, Atq, Def, SpA, SpD, Vel, debilitado, activo, tipo1, tipo2 = 10 y le sumamos los estados
+POKEMON_BASE_FEATURES = 10 
+POKEMON_OBS = POKEMON_BASE_FEATURES + len(STATUS_LIST)
+
+# Movimientos: 2 slots activos * 4 movimientos * 7 features por movimiento
+
 POKEMON_OBS = 16 # Observaciones por pokémon
 OBS_SIZE = 285 # Tamaño del vector de observaciones
 
@@ -47,7 +50,7 @@ class ChampionsDoublesEnv(DoublesEnv):
     - Tipos y Estadísticas (Boosts)
     - Clima, Campos y Condiciones de Bando (Tailwind, Screens, Trick Room)
     - Datos de Movimientos y Efectividad de tipos
-    - Estado de Megaevolución (no Teracristalización)
+    - Estado de Megaevolución
     """
 
     def __init__(self, *args, **kwargs):
@@ -89,8 +92,8 @@ class ChampionsDoublesEnv(DoublesEnv):
     # -------------------------------------------------------------------
     def _encode_type(self, pokemon_type) -> float:
         """Convierte un PokemonType a un float entre 0.0 y 1.0."""
-        if pokemon_type in TYPE_MAP:
-            return TYPE_MAP[pokemon_type] / 18.0
+        if pokemon_type in PokemonType:
+            return PokemonType[pokemon_type] / 18.0
         return 0.0
     
     def _encode_pokemon_full(self, mon, is_active: bool) -> list:
@@ -132,30 +135,37 @@ class ChampionsDoublesEnv(DoublesEnv):
             b_spe,
         ]
 
+    def _encode_effectiveness(self, mult:float) -> float:
+        """Multiplicador de daño en escala logarítmica (simétrica)."""
+        if mult == 0:
+            return -1.0
+        return math.log2(mult) / 2 * 0.8
+    
     def _encode_move(self, move, own_mon, opp_actives) -> list:
         """Extrae 7 características de un movimiento, incluyendo efectividad vs rivales."""
         if move is None:
             return [0.0] * 7
 
         power = (move.base_power or 0) / 250.0
-        accuracy = (move.accuracy or 100) / 100.0 if isinstance(move.accuracy, (int, float)) else 1.0
+        accuracy = move.accuracy
         
         # Categoría: Físico = 1.0, Especial = -1.0, Estado = 0.0
         cat = 0.0
-        if move.category:
-            if move.category.name == "PHYSICAL":
-                cat = 1.0
-            elif move.category.name == "SPECIAL":
-                cat = -1.0
+        if move.category == MoveCategory.PHYSICAL:
+            cat = 1.0
+        elif move.category == MoveCategory.SPECIAL:
+            cat = -1.0
 
         move_type = self._encode_type(move.type)
 
         # Efectividad contra los 2 Pokémon rivales activos en pista
+        is_status = move.category == MoveCategory.STATUS
         eff1, eff2 = 0.0, 0.0
-        if len(opp_actives) > 0 and opp_actives[0] is not None:
-            eff1 = opp_actives[0].damage_multiplier(move) / 4.0
+        if not is_status:
+            if len(opp_actives) > 0 and opp_actives[0] is not None:
+                eff1 = self._encode_effectiveness(opp_actives[0].damage_multiplier(move))
         if len(opp_actives) > 1 and opp_actives[1] is not None:
-            eff2 = opp_actives[1].damage_multiplier(move) / 4.0
+            eff2 = self._encode_effectiveness(opp_actives[1].damage_multiplier(move))
 
         # PPs restantes
         pp_fraction = (move.current_pp / move.max_pp) if move.max_pp > 0 else 0.0
