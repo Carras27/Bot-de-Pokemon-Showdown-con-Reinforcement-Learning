@@ -32,7 +32,7 @@ SIDE_COND_LIST = [SideCondition.REFLECT, SideCondition.LIGHT_SCREEN, SideConditi
                     SideCondition.SPIKES, SideCondition.TOXIC_SPIKES, SideCondition.CRAFTY_SHIELD]
                   
 # Constantes 
-NUM_POKEMON = 6 * 2 # equipo propio + oponente
+NUM_POKEMON = 6 
 
 # Pokémon: PS, Atq, Def, SpA, SpD, Vel, debilitado, activo, tipo1, tipo2 = 10 y le sumamos los estados
 POKEMON_BASE_FEATURES = 10 
@@ -49,7 +49,7 @@ SIDE_OBS = 2 * len(SIDE_COND_LIST) # Una por bando
 MISC_OBS = 2 # can_mega, turno
 
 # Tamaño total del vector de observaciones
-OBS_SIZE = (NUM_POKEMON * POKEMON_OBS  
+OBS_SIZE = (2 * NUM_POKEMON * POKEMON_OBS # equipo propio y oponente  
             + MOVES_OBS + GLOBAL_OBS + SIDE_OBS + MISC_OBS)
 
 
@@ -74,16 +74,18 @@ class ChampionsDoublesEnv(DoublesEnv):
         raw_observation_space = Box(low=observations_low, high=observations_high, dtype=np.float32)
         self.observation_spaces = {agent: raw_observation_space for agent in self.possible_agents}
 
-        self.last_opp_hp = {}  # Para rastrear la vida rival del turno anterior
+        # Para rastrear la vida del turno anterior
+        self.last_opp_hp = {}  
+        self.last_own_hp = {}
 
     def reset(self, *args, **kwargs):
         """
         El mismo objeto de entorno juega muchas partidas seguidas durante el
-        entrenamiento (no se crea uno nuevo por partida). Asi que
-        al final de cada partida nueva se reinician todos los
-        valores para que no interfieran con la siguiente.
+        entrenamiento. Asi que al final de cada partida nueva se reinician 
+        todos los valores para que no interfieran con la siguiente.
         """
         self.last_opp_hp = {}
+        self.last_own_hp = {}
         return super().reset(*args, **kwargs)
 
     # NOTA sobre Team Preview con choose_on_teampreview=True:
@@ -111,7 +113,7 @@ class ChampionsDoublesEnv(DoublesEnv):
         Acitvo/No, Debilitado/No, Tipo(s), estadísticas (boosts) y estados alterados.
         """
         if mon is None:
-            return [0.0] * 11
+            return [0.0] * POKEMON_OBS
 
         # Tipos
         t1 = self._encode_type(mon.type_1)
@@ -185,47 +187,62 @@ class ChampionsDoublesEnv(DoublesEnv):
     def calc_reward(self, battle) -> float:
         reward = 0.0
 
-        # 1. Recompensa por Victoria / Derrota
-        if battle.won:
-            return 10.0
-        elif battle.lost:
-            return -10.0
+        
 
-        # 2. Calcular daño infligido y KOs en este turno
+        # Calcular daño infligido y KOs en este turno
         for mon_key, mon in battle.opponent_team.items():
             prev_hp = self.last_opp_hp.get(mon_key, mon.current_hp_fraction)
             curr_hp = mon.current_hp_fraction
             
-            hp_diff = prev_hp - curr_hp
-            
-            if hp_diff > 0:
+            if prev_hp > curr_hp:
                 # Recompensa proporcional al daño causado
-                reward += hp_diff * 2.0  
+                reward += (prev_hp - curr_hp) * 2.0  
                 
-                # Bonus si el golpe provocó el debilitamiento (KO directo)
-                if mon.fainted and prev_hp > 0:
-                    reward += 4.0  # Bonus por KO
+                # Bonus si el golpe provocó KO
+                if mon.fainted:
+                    reward += 4.0
             
             # Actualizar historial de HP
             self.last_opp_hp[mon_key] = curr_hp
 
-        # 3. Pequeña penalización por paso de turno (para incentivar terminar rápido)
+        # Calcular daño recibido y KOs en este turno
+            for mon_key, mon in battle.team.items():
+                    prev_hp = self.last_own_hp.get(mon_key, mon.current_hp_fraction)
+                    curr_hp = mon.current_hp_fraction
+                    
+                    if prev_hp > curr_hp:
+                        # Penalización proporcional al daño recibido
+                        reward -= (prev_hp - curr_hp) * 2.0  
+                        
+                        # Bonus de penalización si el golpe provocó KO
+                        if mon.fainted:
+                            reward -= 4.0
+                    
+                    # Actualizar historial de HP
+                    self.last_own_hp[mon_key] = curr_hp
+
+        # Pequeña penalización por paso de turno (para incentivar terminar rápido)
         reward -= 0.05
 
+        # Recompensa por Victoria / Derrota
+        if battle.won:
+            return 10.0
+        elif battle.lost:
+            return -10.0
         return reward
 
     def embed_battle(self, battle) -> np.ndarray:
-        # 1. Identificar Pokémon activos en pista
-        active_own = battle.active_pokemon if isinstance(battle.active_pokemon, list) else [battle.active_pokemon]
+        # Identificar Pokémon activos en pista y guardar su nombre
+        active_own = battle.active_pokemon 
         active_own = [m for m in active_own if m is not None]
 
-        active_opp = battle.opponent_active_pokemon if isinstance(battle.opponent_active_pokemon, list) else [battle.opponent_active_pokemon]
+        active_opp = battle.opponent_active_pokemon
         active_opp = [m for m in active_opp if m is not None]
 
-        own_active_species = {m.species for m in active_own}
+        own_active_species = {m.species for m in active_own} # Guarda los nombres de los pokemon para facilitar una comparación posterior
         opp_active_species = {m.species for m in active_opp}
 
-        # 2. Vectorizar Equipo Propio (6 x 16 = 96 observaciones)
+        # Vectorizar Equipo Propio
         own_vec = []
         own_team = sorted(battle.team.values(), key=lambda m: m.species)
         for mon in own_team[:NUM_POKEMON]:
@@ -234,7 +251,7 @@ class ChampionsDoublesEnv(DoublesEnv):
         while len(own_vec) < NUM_POKEMON * POKEMON_OBS:
             own_vec += [0.0] * POKEMON_OBS
 
-        # 3. Vectorizar Equipo Rival
+        # Vectorizar Equipo Rival
         opp_vec = []
         opp_team = list(battle.opponent_team.values())
         for mon in opp_team[:NUM_POKEMON]:
@@ -243,7 +260,7 @@ class ChampionsDoublesEnv(DoublesEnv):
         while len(opp_vec) < NUM_POKEMON * POKEMON_OBS:
             opp_vec += [0.0] * POKEMON_OBS
 
-        # 4. Vectorizar Movimientos de tus Pokémon Activos (2 Pokémon x 4 movs x 7 datos = 56 observaciones)
+        # Vectorizar Movimientos de tus Pokémon Activos
         moves_vec = []
         for slot in range(2):
             if slot < len(active_own) and active_own[slot] is not None:
@@ -256,21 +273,20 @@ class ChampionsDoublesEnv(DoublesEnv):
             else:
                 moves_vec += [0.0] * (MOVES_PER_MON * FEATURES_PER_MOVE)
 
-        # 5. Clima, vector con 4 valores (Sol, Lluvia, Tormenta de Arena y Nieve)
+        # Vectorizar Clima
         active_weather = set(battle.weather.keys()) if battle.weather else set()
         weather_vec = [1.0 if w in active_weather else 0.0 for w in WEATHER_LIST]
 
-        # Campos, vector con 7 valores (Eléctrico, Hierba, Niebla, Psíquico, Gravedad, Magica, Espacio Raro)
+        # Vectorizar Campos
         active_fields = set(battle.fields.keys()) if battle.fields else set()
         fields_vec = [1.0 if f in active_fields else 0.0 for f in FIELD_LIST]
         global_vec =  weather_vec + fields_vec
 
-        # 6. Condiciones de Bando / Side Conditions (12*2 = 24 observaciones)
+        # Vectorizar Condiciones de Bando (Side Conditions)
         # Las púas y púas tóxicas se pueden apilar en 3 y 2 capas respectivamente.
-        # También lo tendremos en cuenta.
         def encode_side_cond(cond, value):
             if cond in STACKABLE_CONDITIONS:
-                return (value or 0) / STACKABLE_CONDITIONS[cond]  # nº de capas -> [0, 1]
+                return (value or 0) / STACKABLE_CONDITIONS[cond]  # nº de capas -> rango [0,1]
             return 1.0 if value is not None else 0.0
  
         own_side_dict = battle.side_conditions or {}
@@ -281,9 +297,9 @@ class ChampionsDoublesEnv(DoublesEnv):
  
 
 
-        # 7. Megaevolución y Métrica de Turno (2 observaciones)
+        # Vectorizar Megaevolución y Turno
         can_mega = 1.0 if battle.can_mega_evolve else 0.0
-        turn_frac = min(battle.turn / 20.0, 1.0)
+        turn_frac = min(battle.turn / 20.0, 1.0) # Las batallas VGC no suelen durar más de 20 turnos.
         misc_vec = [can_mega, turn_frac]
 
         # Unir todas las partes
@@ -297,7 +313,7 @@ class MaskableEnvWrapper(gym.Wrapper):
     Extrae la clave 'action_mask' del diccionario de observaciones en cada turno
     y la expone a través del método `action_masks()`. Esto evita que el bot
     intente acciones ilegales (como seleccionar un movimiento sin PP, bloqueado
-    por Otra Vez / Taunt, o cambiar a un Pokémon debilitado).
+    por Otra Vez / Mofa, o cambiar a un Pokémon debilitado).
     """
 
     def reset(self, **kwargs):
