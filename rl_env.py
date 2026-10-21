@@ -34,14 +34,23 @@ SIDE_COND_LIST = [SideCondition.REFLECT, SideCondition.LIGHT_SCREEN, SideConditi
 # Constantes 
 NUM_POKEMON = 6 * 2 # equipo propio + oponente
 
-# PS, Atq, Def, SpA, SpD, Vel, debilitado, activo, tipo1, tipo2 = 10 y le sumamos los estados
+# Pokémon: PS, Atq, Def, SpA, SpD, Vel, debilitado, activo, tipo1, tipo2 = 10 y le sumamos los estados
 POKEMON_BASE_FEATURES = 10 
 POKEMON_OBS = POKEMON_BASE_FEATURES + len(STATUS_LIST)
 
 # Movimientos: 2 slots activos * 4 movimientos * 7 features por movimiento
+ACTIVE_SLOTS = 2
+MOVES_PER_MON = 4
+FEATURES_PER_MOVE = 7
+MOVES_OBS = ACTIVE_SLOTS * MOVES_PER_MON * FEATURES_PER_MOVE
 
-POKEMON_OBS = 16 # Observaciones por pokémon
-OBS_SIZE = 285 # Tamaño del vector de observaciones
+GLOBAL_OBS = len(WEATHER_LIST) + len(FIELD_LIST)
+SIDE_OBS = 2 * len(SIDE_COND_LIST) # Una por bando
+MISC_OBS = 2 # can_mega, turno
+
+# Tamaño total del vector de observaciones
+OBS_SIZE = (NUM_POKEMON * POKEMON_OBS  
+            + MOVES_OBS + GLOBAL_OBS + SIDE_OBS + MISC_OBS)
 
 
 class ChampionsDoublesEnv(DoublesEnv):
@@ -242,10 +251,10 @@ class ChampionsDoublesEnv(DoublesEnv):
                 moves = list(mon.moves.values())[:4]
                 for move in moves:
                     moves_vec += self._encode_move(move, mon, active_opp)
-                while len(moves_vec) < (slot + 1) * 28:
-                    moves_vec += [0.0] * 7
+                while len(moves_vec) < (slot + 1) * (MOVES_PER_MON * FEATURES_PER_MOVE):
+                    moves_vec += [0.0] * FEATURES_PER_MOVE
             else:
-                moves_vec += [0.0] * 28
+                moves_vec += [0.0] * (MOVES_PER_MON * FEATURES_PER_MOVE)
 
         # 5. Clima, vector con 4 valores (Sol, Lluvia, Tormenta de Arena y Nieve)
         active_weather = set(battle.weather.keys()) if battle.weather else set()
