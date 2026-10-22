@@ -40,14 +40,17 @@ class RLOpponentPlayer(Player):
 
     Se usa durante el entrenamiento self-play: El agente en entrenamiento se enfrenta a
     versiones pasadas de sí mismo, sacadas del pool de checkpoints.
+
+    El rival no aprende durante el entrenamiento. Utiliza lo aprendido por el usuario.
     """
 
     def __init__(self, model, battle_format, *args, **kwargs):
         super().__init__(*args, battle_format=battle_format, **kwargs)
         self.model = model
 
-        # Instancia "ayudante" solo para reutilizar embed_battle/get_action_mask/
-        # action_to_order de ChampionsDoublesEnv, sin conectarse a ningún servidor.
+        # Crea un entorno para reutilizar sus funciones (embed_battle, get_action_mask,
+        # action_to_order). start_listening = False evita que el entorno se conecte al
+        # servidor. 
         self._helper_env = ChampionsDoublesEnv(
             battle_format=battle_format, start_listening=False
         )
@@ -57,47 +60,50 @@ class RLOpponentPlayer(Player):
         return self.random_teampreview(battle)
 
     def choose_move(self, battle):
+        # Calcula las acciones legales del oponente.
         action_mask = np.array(self._helper_env.get_action_mask(battle))
         state = {
             "observation": self._helper_env.embed_battle(battle),
             "action_mask": action_mask,
         }
-        # deterministic=False: un poco de variedad en las partidas del pool
-        # hace que el rival no sea 100% predecible turno a turno, lo cual
+        # deterministic=False: no elige siempre la acción con mayor probabilidad,
+        # sortea entre las acciones según sus probabilidades.
+        # Hace que el rival no sea 100% predecible turno a turno, lo cual
         # ayuda a que el agente en entrenamiento no se sobre-ajuste a un
         # único patrón de juego de esa versión.
         action, _ = self.model.predict(state, action_masks=action_mask, deterministic=False)
 
-        #  sin esto, dos slots pidiendo cambiar al mismo Pokémon de
-        # banca genera el warning "incompatible! Defaulting to random move".
+        # Arregla las combinaciones imposibles.
         action = repair_conflicting_switches(action, action_mask)
 
+        # Convierte los números de las acciones en ordenes Showdown.
+        # Con strict=False, si una acción no es válida, no falla y lo
+        # sustituye por una acción válida de la máscara.
         return ChampionsDoublesEnv.action_to_order(action, battle, strict=False)
 
+def _species_id(mon):
+    """
+    Simplifica el nombre de un Pokémon a su id de especie
+    (sin máyusculas,espacios o guiones).
+    """
+    return to_id_str(mon.species or mon.nickname or "")
 
+def normalize_team(team_export):
+    """
+    Parsea, ordena y normaliza un equipo de Showdown a un string único.
+    Dos equipos con el mismo contenido pero distinto orden o formato darán el mismo resultado.
+    """
+    parsed = sorted(Teambuilder.parse_showdown_team(team_export), key=_species_id)
+    return parsed, Teambuilder.join_team(parsed)
 class RandomTeamFromPool(Teambuilder):
     """Elige un equipo al azar de una lista en cada partida."""
 
     def __init__(self, teams: list[str]):
-        self.packed_teams = [
-            # Los equipos se parsean y normalizan para que dos equipos con el mismo contenido
-            # pero distinto orden o formato den el mismo team_id.
-            self.join_team(self.parse_showdown_team(team)) for team in teams
-        ]
+        self.packed_teams = [normalize_team(team)[1] for team in teams]
     # Se elige un equipo al azar de la lista de equipos disponibles para cada partida.
     def yield_team(self) -> str:
         return random.choice(self.packed_teams)
 
-
-# Subclase mínima solo para poder instanciar Teambuilder (es una clase
-# abstracta) y usar sus métodos de parseo/normalización de equipos
-# (parse_showdown_team / join_team). yield_team nunca se llega a llamar.
-class _TeamParser(Teambuilder):
-    def yield_team(self) -> str:
-        return ""
-
-# Instancia global de _TeamParser para poder usar sus métodos de parseo/normalización de equipos.
-_team_parser = _TeamParser()
 
 
 def compute_team_fingerprint(team_input) -> tuple[str, list[str]]:
@@ -118,19 +124,14 @@ def compute_team_fingerprint(team_input) -> tuple[str, list[str]]:
         # Si ya es el texto normal de un equipo, lo mantenemos
         team_export = str(team_input)
 
-    # Parsea y normaliza el equipo,
-    # así dos equipos con el mismo contenido pero distinto orden o formato dan el mismo team_id.
-    parsed = _team_parser.parse_showdown_team(team_export)
-    packed = _team_parser.join_team(parsed)
+    # Obtiene el equipo normalizado y su versión empaquetada.
+    parsed, packed = normalize_team(team_export)
 
     # Calcula un hash SHA256 del equipo normalizado y lo recorta a 12 caracteres.
     team_id = hashlib.sha256(packed.encode("utf-8")).hexdigest()[:12]
 
     # Extrae el roster.
-    roster = sorted(
-        to_id_str(getattr(mon, "species", None) or getattr(mon, "nickname", None))
-        for mon in parsed
-    )
+    roster = [_species_id(mon) for mon in parsed]
     
     return team_id, roster, team_export
 

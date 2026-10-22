@@ -88,15 +88,6 @@ class ChampionsDoublesEnv(DoublesEnv):
         self.last_own_hp = {}
         return super().reset(*args, **kwargs)
 
-    # NOTA sobre Team Preview con choose_on_teampreview=True:
-    # No hace falta ningún método especial aquí. poke-env reutiliza el
-    # MISMO /action space de siempre: durante el Team Preview llama
-    # a _choose_move(battle) DOS VECES seguidas, cada una esperando que el
-    # modelo elija 2 Pokémon (uno por slot) usando los mismos índices 1-6
-    # que ya se usan para switches normales.
-    # get_action_mask() de DoublesEnv ya tiene su propia rama para
-    # battle.teampreview.
-
 
     # -------------------------------------------------------------------
     # MÉTODOS DE OBSERVACIÓN Y RECOMPENSA
