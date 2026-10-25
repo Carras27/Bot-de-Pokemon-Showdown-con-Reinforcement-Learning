@@ -1,10 +1,9 @@
 """
-Entrena (o continúa entrenando) un agente PPO para tu equipo de Pokémon
-Champions VGC, usando SELF-PLAY.
+Entrena un agente PPO para tu equipo de Pokémon Champions VGC, usando SELF-PLAY.
 
 El entrenamiento se divide en bloques de `--chunk-size` pasos.
 Al final de cada bloque se guarda el modelo actual como checkpoint
-en un pool (self_play_pool/), y para el SIGUIENTE bloque se sortea el oponente entre:
+en un pool (self_play_pool/), y para el siguiente bloque se sortea el oponente entre:
   - el heurístico MaxBasePower (con probabilidad --heuristic-prob), para
     que el agente no olvide cómo ganarle a un rival simple pero agresivo.
   - una versión congelada elegida al azar de entre todo el pool de
@@ -48,12 +47,12 @@ def pick_opponent(heuristic_prob: float):
     # Lista de checkpoints del pool, ordenada por nombre.
     checkpoints = sorted(POOL_DIR.glob("*.zip"))
 
-    # Si el pool está vacío o sale el heurístico por probabilidad, se devuelve
+    # Si el pool está vacío o sale el heurístico, se devuelve
     if not checkpoints or random.random() < heuristic_prob:
         opponent = VGCMaxBasePowerPlayer(battle_format=BATTLE_FORMAT)
         return opponent, "heurístico (MaxBasePower)"
 
-    # Si no, se elige un checkpoint al azar del pool y se carga como modelo congelado.
+    # Si no, se elige un checkpoint al azar del pool y se carga el modelo.
     checkpoint_path = random.choice(checkpoints)
     frozen_model = MaskablePPO.load(checkpoint_path)
     opponent = RLOpponentPlayer(model=frozen_model, battle_format=BATTLE_FORMAT)
@@ -105,16 +104,22 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    # Inicialización de las variables para el modelo y recuento de pasos.
     model = None
     steps_done = 0
 
+    # Mientras no llegué al máximo de pasos, se entrena en bloques de `chunk_size` pasos cada uno.
     while steps_done < args.timesteps:
+        # Para no superar el total de pasos, el último bloque puede ser más pequeño que `chunk_size`.
         chunk = min(args.chunk_size, args.timesteps - steps_done)
 
+        # Escoge el oponente para el siguiente bloque y monta el entorno.
         opponent, opp_desc = pick_opponent(args.heuristic_prob)
         env = make_env(opponent)
         print(f"\n--- Bloque de pasos {steps_done} a {steps_done + chunk} | oponente: {opp_desc} ---")
 
+        # Comprueba si existe un modelo entrenado previamente. Se reutilizan los pesos aprendidos.
+        # Si no, se crea uno nuevo desde cero. 
         if model is None:
             if os.path.exists(f"{MODEL_NAME}.zip"):
                 print(f"--- Cargando modelo existente: {MODEL_NAME} ---")
@@ -124,8 +129,6 @@ if __name__ == "__main__":
                 print("--- No se encontró modelo previo. Iniciando entrenamiento desde cero ---")
                 model = MaskablePPO("MultiInputPolicy", env, verbose=1)
         else:
-            # Reutiliza los pesos ya aprendidos, solo cambia el entorno
-            # (y por tanto el oponente) para este bloque.
             model.set_env(env)
 
         model.learn(total_timesteps=chunk, reset_num_timesteps=False)
@@ -146,7 +149,7 @@ if __name__ == "__main__":
             oldest.unlink()
             print(f"--- Pool lleno ({args.pool_max} máx.), eliminado el más antiguo: {oldest.name} ---")
 
-        # Guarda también como el modelo "principal" tras cada bloque, por si
+        # Guarda también el modelo "principal" tras cada bloque, por si
         # la ejecución se corta a mitad de un entrenamiento largo.
         model.save(MODEL_NAME)
 
